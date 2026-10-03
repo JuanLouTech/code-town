@@ -155,3 +155,9 @@ client/     Vite + three.js: the island, villagers and the cozy game-style UI
 The server only listens on `127.0.0.1` and rejects WebSocket connections from other origins.
 
 Sessions get a short system-prompt addition telling Claude its final message is shown in a speech bubble, so it opens with a summary.
+
+## License
+
+Copyright 2026 Juan Luis García. Licensed under the [MIT License](LICENSE).
+
+Not affiliated with Anthropic. Claude is a trademark of Anthropic.

@@ -2,6 +2,7 @@
   "name": "code-town",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "A cozy island where every folder is a farm and every Claude Code session is a villager.",
   "type": "module",
   "scripts": {
