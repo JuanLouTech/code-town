@@ -533,3 +533,18 @@ textarea.uploading { background: #f3fbf9 linear-gradient(90deg, transparent, #19
 .race-rank { width: 28px; color: var(--ink-soft); }
 .race-t { flex: 1; }
 .race-date { color: var(--ink-soft); font-size: 13px; }
+
+/* Track workshop */
+.tracks .race-board { margin: 0 0 6px; max-width: none; }
+.track-row {
+  display: flex; align-items: center; gap: 14px; padding: 10px 14px; margin-bottom: 8px;
+  border: 3px solid var(--line); border-radius: 20px; background: #fff;
+}
+.track-row.on { border-color: var(--orange); background: #fff7e3; }
+.track-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.track-name { font-weight: 900; font-size: 16px; }
+.track-bad { color: #c9483a; font-weight: 800; font-size: 13px; }
+.track-thumb { border-radius: 10px; flex: none; }
+.track-canvas-wrap { display: flex; justify-content: center; margin: 10px 0; }
+.track-canvas { border-radius: 16px; box-shadow: 0 0 0 3px var(--line); outline: none; touch-action: none; }
+.track-canvas:focus { box-shadow: 0 0 0 3px var(--teal); }

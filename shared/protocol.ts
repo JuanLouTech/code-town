@@ -1,5 +1,7 @@
 // Wire protocol shared by the island server and the browser client.
 
+import type { TrackDef, TrackRun } from './tracks.ts';
+
 export type Species =
   | 'cat' | 'dog' | 'bear' | 'rabbit' | 'frog' | 'duck' | 'mouse' | 'fox'
   | 'pig' | 'sheep' | 'koala' | 'penguin' | 'human' | 'gnome';
@@ -65,7 +67,7 @@ export const CIRCUIT_ID = '.circuit';
 /** Their sizes, in lots. */
 export const RESERVED_SIZES: Record<string, { cols: number; rows: number }> = {
   [FAIR_ID]: { cols: 2, rows: 2 },
-  [CIRCUIT_ID]: { cols: 5, rows: 3 },
+  [CIRCUIT_ID]: { cols: 8, rows: 5 },
 };
 
 export type SessionStatus =
@@ -227,6 +229,9 @@ export type ClientMsg =
   | { t: 'rescan' }
   | { t: 'arrange'; blocks?: Record<string, { gx: number; gz: number }>; slots?: Record<string, Record<string, number>> }
   | { t: 'save'; key: string; value: unknown }
+  | { t: 'track.save'; reqId: string; track: Omit<TrackDef, 'id' | 'created' | 'times'> }
+  | { t: 'track.delete'; id: string }
+  | { t: 'track.time'; id: string; run: TrackRun }
   | { t: 'term.open'; termId: string; buildingId: string; cwd?: string; cols: number; rows: number }
   | { t: 'term.input'; termId: string; data: string }
   | { t: 'term.resize'; termId: string; cols: number; rows: number }
@@ -234,7 +239,7 @@ export type ClientMsg =
   | { t: 'term.escape'; termId: string };
 
 export type ServerMsg =
-  | { t: 'hello'; world: WorldState; sessions: SessionSummary[]; claudeVersion?: string; commands: Record<string, CommandInfo[]>; player?: Record<string, unknown>; worktrees?: WorktreeInfo[]; visitors?: VisitorInfo[] }
+  | { t: 'hello'; world: WorldState; sessions: SessionSummary[]; claudeVersion?: string; commands: Record<string, CommandInfo[]>; player?: Record<string, unknown>; tracks?: TrackDef[]; worktrees?: WorktreeInfo[]; visitors?: VisitorInfo[] }
   | { t: 'commands'; id: string; commands: CommandInfo[] }
   | { t: 'term.data'; termId: string; data: string }
   | { t: 'term.exit'; termId: string; code: number; error?: string; closed?: boolean }
@@ -246,6 +251,8 @@ export type ServerMsg =
   | { t: 'history'; buildingId: string; cwd?: string; items: HistoryItem[] }
   | { t: 'worktrees'; worktrees: WorktreeInfo[]; visitors: VisitorInfo[] }
   | { t: 'player'; key: string; value: unknown }
+  | { t: 'tracks'; tracks: TrackDef[] }
+  | { t: 'track.saved'; reqId: string; id?: string; error?: string }
   | { t: 'worktree.detail'; detail: WorktreeDetail }
   | { t: 'worktree.removed'; path: string; error?: string }
   | { t: 'historyTranscript'; sessionId: string; entries: TranscriptEntry[] }

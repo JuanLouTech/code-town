@@ -12,6 +12,7 @@ import { isTyping } from './game/player.ts';
 import type { Actor } from './game/villagers.ts';
 import { Net, Store } from './net.ts';
 import { Saves } from './save.ts';
+import { Tracks, type TrackSave } from './tracks.ts';
 import { applySettings, loadSettings, openSettings } from './settings.ts';
 import { Voice } from './ui/audio.ts';
 import { Dialog } from './ui/dialog.ts';
@@ -48,7 +49,8 @@ activities.setDay(saves.local<DayState>('day'));
 activities.onDay = (d) => saves.set('day', d);
 const garage = new Garage(island, pockets, hud, voice);
 const app: App = { island, store, net, dialog, panel, hud, voice, map, mailboxes, pockets, garage };
-const funfair = new FunFair(ui, island, garage, panel, hud, voice, saves, pockets);
+const tracks = new Tracks(island, net, saves);
+const funfair = new FunFair(ui, island, garage, panel, hud, voice, saves, pockets, tracks);
 
 // --- minigames -------------------------------------------------------------------------
 
@@ -74,6 +76,7 @@ function applySaves(player: Record<string, unknown> | undefined) {
     circuit: (a: { board?: { timeMs: number }[] }, b: { board?: { timeMs: number }[] }) =>
       ({ board: [...(a.board ?? []), ...(b.board ?? [])].sort((x, y) => x.timeMs - y.timeMs).slice(0, 10) }),
     nonogram: null,
+    track: null,
   });
   for (const [key, value] of Object.entries(got)) applySave(key, value);
   if (island.world) garage.restore();
@@ -86,6 +89,7 @@ function applySave(key: string, value: unknown) {
     if (island.world) garage.restore();
   } else if (key === 'growth') island.setGrowth(value as Record<string, number>);
   else if (key === 'day') activities.setDay(value as DayState);
+  else if (key === 'track' && (value as TrackSave | undefined)?.id) tracks.apply();
   // races / nonogram are read from the saves when needed
 }
 saves.onRemote = applySave;
@@ -211,6 +215,7 @@ function handle(msg: Parameters<Parameters<Store['on']>[0]>[0]) {
   switch (msg.t) {
     case 'hello': {
       applySaves(msg.player);
+      if (msg.tracks) tracks.setList(msg.tracks);
       if (!lastWorld || lastWorld.version !== msg.world.version) setWorld(msg.world);
       island.setSessions(msg.sessions);
       refreshOutside();
@@ -248,6 +253,9 @@ function handle(msg: Parameters<Parameters<Store['on']>[0]>[0]) {
       break;
     case 'player':
       saves.remote(msg.key, msg.value);
+      break;
+    case 'tracks':
+      tracks.setList(msg.tracks);
       break;
     case 'sessionRemoved':
       island.removeSession(msg.id);

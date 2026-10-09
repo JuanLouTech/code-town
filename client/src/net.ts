@@ -123,6 +123,7 @@ export class Net {
       case 'built': return 'build';
       case 'worktree.detail': return `wt:${msg.detail.path}`;
       case 'worktree.removed': return `wtrm:${msg.path}`;
+      case 'track.saved': return `track:${msg.reqId}`;
       default: return undefined;
     }
   }
@@ -148,6 +149,14 @@ export class Net {
       this.waiting.set(key, { resolve: (m) => (clearTimeout(timer), resolve(m as T)), reject: fail });
       this.send(msg);
     });
+  }
+
+  /** Saves a kart track as a new version file; resolves to its id. */
+  async saveTrack(track: Extract<ClientMsg, { t: 'track.save' }>['track']): Promise<string> {
+    const reqId = Math.random().toString(36).slice(2);
+    const res = await this.request<Extract<ServerMsg, { t: 'track.saved' }>>(`track:${reqId}`, { t: 'track.save', reqId, track }, 15_000);
+    if (!res.id) throw new Error(res.error ?? 'Couldn’t save the track.');
+    return res.id;
   }
 
   async start(p: { buildingId: string; characterId?: string; hire?: boolean; prompt: string; opts: StartOptions; resume?: string; resumeCwd?: string; cwd?: string }) {

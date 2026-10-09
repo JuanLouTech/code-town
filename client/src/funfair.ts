@@ -1,17 +1,17 @@
 import type * as THREE from 'three';
 import type { Garage } from './garage.ts';
 import type { Island } from './game/island.ts';
-import { LAPS, Race, raceTime, rankRun, type RaceResult, type RaceRun } from './game/race.ts';
+import { LAPS, Race, raceTime, type RaceResult, type RaceRun } from './game/race.ts';
 import type { Saves } from './save.ts';
+import type { Tracks } from './tracks.ts';
 import type { Voice } from './ui/audio.ts';
 import type { Hud } from './ui/hud.ts';
 import { openNonogram, type NonogramSave } from './ui/nonogram.ts';
 import { h, type Panel } from './ui/panel.ts';
+import { openTrackWorkshop } from './ui/trackeditor.ts';
 import type { Pockets } from './ui/pockets.ts';
 
-export interface RaceSave { board: RaceRun[] }
-
-export type FairSpot = 'race' | 'raceLocked' | 'nonogram';
+export type FairSpot = 'race' | 'raceLocked' | 'nonogram' | 'workshop';
 
 const FINISH_COINS = 100;
 const RECORD_COINS = 300;
@@ -25,7 +25,7 @@ export class FunFair {
 
   constructor(
     ui: HTMLElement, private island: Island, private garage: Garage, private panel: Panel,
-    private hud: Hud, private voice: Voice, private saves: Saves, private pockets: Pockets,
+    private hud: Hud, private voice: Voice, private saves: Saves, private pockets: Pockets, private tracks: Tracks,
   ) {
     ui.append(this.hudEl, this.bigEl);
   }
@@ -40,10 +40,12 @@ export class FunFair {
     if (this.racing) return undefined;
     const start = circuit?.track.startPos;
     if (this.garage.driving) {
-      return start && pos.distanceTo(start) < 7 ? { kind: 'race', label: `🏁 Start a time trial (${LAPS} laps)` } : undefined;
+      const near = circuit && start && (pos.distanceTo(circuit.pad) < 4.5 || pos.distanceTo(start) < 7);
+      return near ? { kind: 'race', label: `🏁 Race ${circuit.def.name} (${LAPS} laps)` } : undefined;
     }
     if (fair && pos.distanceTo(fair.booths.nonogram) < 2.6) return { kind: 'nonogram', label: '🧩 Play picross' };
-    if (circuit && start && (pos.distanceTo(circuit.booth) < 3 || pos.distanceTo(start) < 4)) {
+    if (circuit && pos.distanceTo(circuit.booth) < 2.6) return { kind: 'workshop', label: '🛠️ Track workshop · edit & load tracks' };
+    if (circuit && start && (pos.distanceTo(circuit.pad) < 3 || pos.distanceTo(start) < 4)) {
       return { kind: 'raceLocked', label: this.garage.owned ? '🏁 Hop in your kart (K) to race' : '🏁 Time trial · kart owners only' };
     }
     return undefined;
@@ -52,6 +54,7 @@ export class FunFair {
   interact(kind: FairSpot) {
     if (kind === 'race') this.startRace();
     else if (kind === 'nonogram') void this.picross();
+    else if (kind === 'workshop') openTrackWorkshop(this.panel, this.tracks, this.island, (t) => this.hud.toast(t));
     else this.hud.toast(this.garage.owned ? '🏎️ Press K to hop in your kart, then drive onto the start line.' : '🏎️ Only kart owners can race. Kip sells karts at the plaza stall!');
   }
 
@@ -59,7 +62,7 @@ export class FunFair {
   handleKey(e: KeyboardEvent): boolean {
     if (!this.racing) return false;
     if (e.code === 'Escape') {
-      this.endRace();
+      this.endRace(true);
       this.hud.toast('🏳️ Race abandoned.');
       return true;
     }
@@ -71,7 +74,7 @@ export class FunFair {
     if (!race) return;
     const now = performance.now();
     if (!this.garage.driving && !race.finished) {
-      this.endRace();
+      this.endRace(true);
       this.hud.toast('🏳️ You got out of the kart, so the race is off.');
       return;
     }
@@ -95,12 +98,13 @@ export class FunFair {
   }
 
   private board(): RaceRun[] {
-    return this.saves.local<RaceSave>('circuit')?.board ?? [];
+    return this.tracks.active.times;
   }
 
   private startRace() {
     const circuit = this.island.circuit;
     if (!circuit || !this.garage.driving) return;
+    this.tracks.hold = true;
     const race = new Race(circuit.track, this.island.player);
     race.onBeep = (go) => this.voice.beep(go);
     race.onCheckpoint = () => this.voice.pop();
@@ -113,18 +117,33 @@ export class FunFair {
     this.island.effects.poof(this.island.player.pos.clone(), 12, '#ffffff', 1);
   }
 
-  private endRace() {
+  /** Ends the race; `home` takes the kart back to the paddock (the track's walls are closed). */
+  private endRace(home = false) {
     this.race = undefined;
     this.hudEl.classList.remove('show');
     this.bigEl.classList.remove('show');
+    if (home) this.backToPaddock();
+    this.tracks.release();
+  }
+
+  private backToPaddock() {
+    const c = this.island.circuit;
+    if (!c) return;
+    const north = Math.PI;
+    const player = this.island.player;
+    if (this.garage.driving) this.garage.parkAt(c.pad.x, c.pad.z, north);
+    else {
+      this.garage.parkAt(c.pad.x, c.pad.z, north);
+      player.place(player.findFree(c.pad.clone().setX(c.pad.x + 2.2)), north);
+    }
+    this.island.effects.poof(c.pad.clone(), 12, '#ffffff', 1);
   }
 
   private async finish(r: RaceResult) {
-    this.endRace();
+    this.endRace(true);
     const run = { timeMs: Math.round(r.timeMs), date: Date.now() };
     const prev = this.board();
-    const { board, rank } = rankRun(prev, run);
-    this.saves.set('circuit', { board } satisfies RaceSave);
+    const { board, rank } = this.tracks.addRun(run);
     const record = rank === 1;
     const coins = FINISH_COINS + (record ? RECORD_COINS : 0);
     this.pockets.addCoins(coins);
@@ -143,7 +162,7 @@ export class FunFair {
         : 'Not in the top 10 this time. Keep practising!'),
       h('div', { class: 'race-note' }, r.laps.map((l, i) => `Lap ${i + 1}: ${raceTime(l)}`).join(' · ')),
       h('div', { class: 'race-note' }, `🪙 +${coins} coins`),
-      h('div', { class: 'group-title' }, '🏁 Top 10'),
+      h('div', { class: 'group-title' }, `🏁 Top 10 · ${this.tracks.active.name}`),
       table);
     await new Promise<void>((resolve) => {
       again.addEventListener('click', () => {

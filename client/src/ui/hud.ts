@@ -75,7 +75,7 @@ export class Hud {
   /** The key hints at the bottom left (they change while driving the kart). */
   setHint(driving: boolean) {
     this.hint.innerHTML = driving
-      ? '<kbd>W</kbd>/<kbd>S</kbd> drive · <kbd>A</kbd>/<kbd>D</kbd> steer · <kbd>Space</kbd> hop/drift · <kbd>E</kbd> get out · <kbd>K</kbd> park · <kbd>M</kbd> map · <kbd>Esc</kbd> leave'
+      ? '<kbd>W</kbd>/<kbd>S</kbd> drive · <kbd>A</kbd>/<kbd>D</kbd> steer · <kbd>Space</kbd> + steer drift · <kbd>E</kbd> get out · <kbd>K</kbd> park · <kbd>M</kbd> map · <kbd>Esc</kbd> leave'
       : '<kbd>WASD</kbd> move · <kbd>Shift</kbd> run · <kbd>Space</kbd> jump · <kbd>E</kbd> talk · <kbd>T</kbd> mailbox · <kbd>M</kbd> map · <kbd>Tab</kbd>/<kbd>V</kbd> villagers · <kbd>I</kbd> pockets · <kbd>O</kbd> options · <kbd>Esc</kbd> leave · scroll to zoom';
   }
 

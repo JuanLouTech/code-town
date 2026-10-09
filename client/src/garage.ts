@@ -13,6 +13,7 @@ export class Garage implements ShopGarage {
 
   constructor(private island: Island, private pockets: Pockets, private hud: Hud, private voice: Voice) {
     this.kart = new Kart(pockets.data.kart?.color ?? '#e8423b');
+    this.kart.offRoad = (x, z) => island.circuit?.offTrack(x, z) ?? false;
     island.player.onBump = () => voice.bump();
   }
 
@@ -99,6 +100,17 @@ export class Garage implements ShopGarage {
       this.saveTimer = 0;
       this.save();
     }
+  }
+
+  /** Puts the kart (and the player, if driving it) somewhere else, e.g. back in the paddock after a race. */
+  parkAt(x: number, z: number, heading: number) {
+    this.kart.park(x, z, heading);
+    if (this.driving) {
+      const p = this.island.player;
+      p.pos.set(x, 0, z);
+      p.facing = heading;
+    }
+    this.save();
   }
 
   private save() {

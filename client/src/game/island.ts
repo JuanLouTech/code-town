@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Building, SessionSummary, WorldState } from '../../../shared/protocol.ts';
+import { GRAND_PRIX_ID, STARTER_TRACKS, type TrackDef } from '../../../shared/tracks.ts';
 import { Ambient } from './ambient.ts';
 import { buildLot, buildPlaza, buildTownSign, setClock, type Collider, type TowerClock } from './buildings.ts';
 import { Effects } from './effects.ts';
@@ -40,6 +41,17 @@ function skyAt(hour: number) {
   };
 }
 
+/** The built-in Grand Prix, until the saved tracks arrive from the server. */
+export function starterTrack(): TrackDef {
+  const t = STARTER_TRACKS.find((x) => x.id === GRAND_PRIX_ID)!;
+  return { ...t, created: 0, times: [] };
+}
+
+/** Same layout and name: no need to rebuild the circuit (times may differ). */
+function sameTrack(a: TrackDef, b: TrackDef) {
+  return a.name === b.name && JSON.stringify(a.corners) === JSON.stringify(b.corners);
+}
+
 export class Island {
   engine: Engine;
   effects = new Effects();
@@ -53,6 +65,8 @@ export class Island {
   nature?: NatureInfo;
   fair?: FairObjects;
   circuit?: CircuitObjects;
+  /** The track the circuit is built with (see setTrack). */
+  trackDef: TrackDef = starterTrack();
   pumpkins = new PumpkinPatch();
   private statics = new THREE.Group();
   private water?: ReturnType<typeof buildWater>;
@@ -137,7 +151,7 @@ export class Island {
       }
     }
     this.fair = world.fair ? buildFair(world.fair) : undefined;
-    this.circuit = world.circuit ? buildCircuit(world.circuit) : undefined;
+    this.circuit = world.circuit ? buildCircuit(world.circuit, this.trackDef) : undefined;
     for (const x of [this.fair, this.circuit]) {
       if (!x) continue;
       this.statics.add(x.group);
@@ -162,6 +176,16 @@ export class Island {
     this.setOpenMailboxes(this.openMail);
     const L = plazaLayout(world);
     if (first || shape.sdf(this.player.pos.x, this.player.pos.z) > -1.4) this.player.place(L.spawn, Math.PI);
+  }
+
+  /** Rebuilds the circuit with another track (the whole island is rebuilt, like on a world change). */
+  setTrack(def: TrackDef) {
+    if (sameTrack(def, this.trackDef)) {
+      this.trackDef = def;
+      return;
+    }
+    this.trackDef = def;
+    if (this.world) this.setWorld(this.world);
   }
 
   /** Raises the flag on every mailbox whose terminal is open. */

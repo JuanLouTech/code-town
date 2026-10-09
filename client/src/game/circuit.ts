@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Block } from '../../../shared/protocol.ts';
+import type { TrackDef } from '../../../shared/tracks.ts';
 import { ModelBuilder } from './builder.ts';
 import { smallTree, type Collider } from './buildings.ts';
 import { colorMat } from './engine.ts';
@@ -9,6 +10,7 @@ import {
 } from './fair.ts';
 import { blockBounds } from './layout.ts';
 import { makeSign } from './props.ts';
+import { HALF_WIDTH, WALL, distToTrack, planTrack, trackArea, type P2, type TrackPlan } from './trackplan.ts';
 
 export interface FairTrack {
   /** Closed centerline, evenly spaced samples (~0.6 apart), world XZ (y = 0). */
@@ -23,165 +25,29 @@ export interface CircuitObjects {
   group: THREE.Group;
   colliders: Collider[];
   track: FairTrack;
-  /** Where the player stands at the race booth / start sign (reachable on foot from the entrance). */
+  /** The track this circuit was built from. */
+  def: TrackDef;
+  /** Where the player stands at the race booth's window (track workshop). */
   booth: THREE.Vector3;
-  /** On the road just outside the circuit's opening (fast-travel spot). */
+  /** The chequered pad in the paddock: drive onto it to start a time trial; karts come back here after. */
+  pad: THREE.Vector3;
+  /** On the road just outside the circuit's gate (fast-travel spot). */
   entrance: THREE.Vector3;
+  /** True on the circuit's grass (inside its fence, off the asphalt and kerbs): karts are slow there. */
+  offTrack(x: number, z: number): boolean;
   update(dt: number, t: number): void;
 }
 
-const HALF_WIDTH = 3.5;
 const KERB = 0.45;
-/** Distance from the centerline to the middle of the barrier walls. */
-const WALL = 4.25;
 /** Wall collider half-size, and the spacing of the collider chain along each wall. */
 const WALL_BOX = 0.3;
 const WALL_STEP = 0.5;
-const SAMPLE = 0.6;
 
-/**
- * The circuit as a polygon whose corners are rounded with the given radii
- * (block-local x, z from the block's north-west corner; designed for a 5×3
- * block, 100×60). Racing direction: east along the south straight, a
- * sweeping S up the east side, two deep hairpin dives from the north, and a
- * chicane down the west side.
- */
-const CORNERS: [number, number, number][] = [
-  [9, 48, 8],       // south-west
-  [91, 48, 8],      // south-east
-  [91, 34.5, 6],    // east S
-  [84, 28, 5.5],
-  [91, 22, 6],
-  [91, 13, 6],      // north-east
-  [73, 13, 5.5],    // dive 2
-  [73, 37.5, 6.5],
-  [60, 37.5, 6.5],
-  [60, 13, 5.5],
-  [47, 13, 5.5],    // dive 1
-  [47, 37.5, 6.5],
-  [34, 37.5, 6.5],
-  [34, 13, 5.5],
-  [9, 13, 7],       // north-west
-  [9, 23.5, 5],     // west chicane
-  [16.5, 30, 5],
-  [9, 36.5, 5],
-];
-
-const START_X = 54;           // start/finish line on the south straight
-const OPENING = { x: 30, half: 3 };   // gap in the outer wall / fence, pit lane from the south road
-const BOOTH = { x: 38.5, z: 55 };
-const GRANDSTANDS: [number, number][] = [[12, 32], [76.5, 88.5]]; // x ranges, north side
+/** The paddock, along the south fence: the gate from the road, the start pad and the booth. */
+const GATE_X = 30;
+const GATE_HALF = 3;
 
 // --- track -----------------------------------------------------------------------------
-
-interface TrackPlan {
-  pts: THREE.Vector3[];   // block-local
-  left: THREE.Vector3[];  // unit normal to the left of the racing direction
-  tan: THREE.Vector3[];
-  inward: number;         // +1 if the infield is on the left, -1 if on the right
-  length: number;
-}
-
-/** Straights joined by circular fillets, as a dense closed polyline. */
-function filletPath(corners: [number, number, number][]) {
-  const n = corners.length;
-  const fil = corners.map(([x, z, r], i) => {
-    const [ax, az] = corners[(i - 1 + n) % n], [bx, bz] = corners[(i + 1) % n];
-    const u = new THREE.Vector2(ax - x, az - z).normalize(), v = new THREE.Vector2(bx - x, bz - z).normalize();
-    const phi = Math.acos(THREE.MathUtils.clamp(u.dot(v), -1, 1));
-    const t = r / Math.tan(phi / 2);
-    const bis = u.clone().add(v).normalize();
-    const c = new THREE.Vector2(x, z).addScaledVector(bis, r / Math.sin(phi / 2));
-    return { t1: new THREE.Vector2(x, z).addScaledVector(u, t), t2: new THREE.Vector2(x, z).addScaledVector(v, t), c, r, t };
-  });
-  for (let i = 0; i < n; i++) {
-    const [x0, z0] = corners[i], [x1, z1] = corners[(i + 1) % n];
-    if (fil[i].t + fil[(i + 1) % n].t > Math.hypot(x1 - x0, z1 - z0) + 1e-6) console.warn('[circuit] corner radii too big for edge', i);
-  }
-  const out: THREE.Vector2[] = [];
-  for (let i = 0; i < n; i++) {
-    const f = fil[i];
-    const a0 = Math.atan2(f.t1.y - f.c.y, f.t1.x - f.c.x);
-    let da = Math.atan2(f.t2.y - f.c.y, f.t2.x - f.c.x) - a0;
-    while (da > Math.PI) da -= Math.PI * 2;
-    while (da < -Math.PI) da += Math.PI * 2;
-    const arcSteps = Math.max(2, Math.ceil((Math.abs(da) * f.r) / 0.05));
-    for (let k = 0; k < arcSteps; k++) {
-      const a = a0 + (da * k) / arcSteps;
-      out.push(new THREE.Vector2(f.c.x + Math.cos(a) * f.r, f.c.y + Math.sin(a) * f.r));
-    }
-    const next = fil[(i + 1) % n].t1;
-    const lineSteps = Math.max(1, Math.ceil(f.t2.distanceTo(next) / 0.05));
-    for (let k = 0; k < lineSteps; k++) out.push(f.t2.clone().lerp(next, k / lineSteps));
-  }
-  return out;
-}
-
-/** Resamples a closed polyline at even arc-length steps of about `step`. */
-function resample(poly: THREE.Vector2[], step: number) {
-  const m = poly.length;
-  const cum = [0];
-  for (let i = 0; i < m; i++) cum.push(cum[i] + poly[i].distanceTo(poly[(i + 1) % m]));
-  const total = cum[m];
-  const n = Math.round(total / step);
-  const pts: THREE.Vector3[] = [];
-  let seg = 0;
-  for (let k = 0; k < n; k++) {
-    const s = (k * total) / n;
-    while (cum[seg + 1] < s) seg++;
-    const a = poly[seg], b = poly[(seg + 1) % m];
-    const t = (s - cum[seg]) / Math.max(1e-9, cum[seg + 1] - cum[seg]);
-    pts.push(new THREE.Vector3(a.x + (b.x - a.x) * t, 0, a.y + (b.y - a.y) * t));
-  }
-  return pts;
-}
-
-function planTrack(): TrackPlan {
-  const pts = resample(filletPath(CORNERS), SAMPLE);
-  const n = pts.length;
-  const tan: THREE.Vector3[] = [];
-  const left: THREE.Vector3[] = [];
-  let area = 0, length = 0;
-  for (let i = 0; i < n; i++) {
-    const a = pts[(i - 1 + n) % n], b = pts[(i + 1) % n], p = pts[i];
-    const t = new THREE.Vector3(b.x - a.x, 0, b.z - a.z).normalize();
-    tan.push(t);
-    left.push(new THREE.Vector3(t.z, 0, -t.x));
-    area += p.x * b.z - b.x * p.z;
-    length += p.distanceTo(b);
-  }
-  // Left of (tx, tz) with y up is (tz, -tx); with this orientation a positive shoelace area puts the infield on the right.
-  return { pts, left, tan, inward: area > 0 ? -1 : 1, length };
-}
-
-/**
- * Sanity numbers for a closed track: its length, the smallest distance
- * between samples more than 20 units apart along the track (must exceed
- * 2 * halfWidth + 3 so both walls fit between neighbouring stretches), and
- * the tightest radius of curvature (must exceed halfWidth + 1).
- */
-export function checkTrack(points: THREE.Vector3[], halfWidth: number) {
-  const n = points.length;
-  let length = 0;
-  for (let i = 0; i < n; i++) length += points[i].distanceTo(points[(i + 1) % n]);
-  const window = Math.ceil(20 / (length / n));
-  let minGap = Infinity;
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      if (Math.min(j - i, n - (j - i)) < window) continue;
-      minGap = Math.min(minGap, Math.hypot(points[i].x - points[j].x, points[i].z - points[j].z));
-    }
-  }
-  let minRadius = Infinity;
-  for (let i = 0; i < n; i++) {
-    const a = points[(i - 3 + n) % n], b = points[i], c = points[(i + 3) % n];
-    const cross = Math.abs((b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x));
-    if (cross < 1e-9) continue;
-    const r = (Math.hypot(b.x - a.x, b.z - a.z) * Math.hypot(c.x - b.x, c.z - b.z) * Math.hypot(a.x - c.x, a.z - c.z)) / (2 * cross);
-    minRadius = Math.min(minRadius, r);
-  }
-  return { length, samples: n, minGap, minRadius, ok: minGap > 2 * halfWidth + 3 && minRadius > halfWidth + 1 };
-}
 
 /** The nearest centerline sample to (x, z) and how far away it is. */
 export function trackProgress(track: FairTrack, x: number, z: number): { index: number; dist: number } {
@@ -195,25 +61,6 @@ export function trackProgress(track: FairTrack, x: number, z: number): { index: 
     }
   }
   return { index, dist: Math.sqrt(best) };
-}
-
-function nearestIndex(plan: TrackPlan, x: number, z: number) {
-  let index = 0, best = Infinity;
-  plan.pts.forEach((p, i) => {
-    const d = (p.x - x) ** 2 + (p.z - z) ** 2;
-    if (d < best) {
-      best = d;
-      index = i;
-    }
-  });
-  return index;
-}
-
-/** Distance from (x, z) to the closest centerline sample. */
-function distToTrack(plan: TrackPlan, x: number, z: number) {
-  let best = Infinity;
-  for (const p of plan.pts) best = Math.min(best, (p.x - x) ** 2 + (p.z - z) ** 2);
-  return Math.sqrt(best);
 }
 
 /** Asphalt, kerbs, the chequered line and the grid boxes: one flat, shadow-receiving mesh. */
@@ -289,6 +136,22 @@ function along(poly: THREE.Vector2[], step: number) {
   return out;
 }
 
+/** Is (x, z) inside the closed centerline? */
+function insideTrack(pts: P2[], x: number, z: number) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j];
+    if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+/** A tiny deterministic hash, so decorations land in the same places every time a track is built. */
+function hash2(x: number, z: number) {
+  const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+
 // --- grandstand ------------------------------------------------------------------------
 
 function grandstand(mb: ModelBuilder, x0: number, x1: number, back: number, front: number, seed: number) {
@@ -331,12 +194,11 @@ function grandstand(mb: ModelBuilder, x0: number, x1: number, back: number, fron
 // --- the circuit -----------------------------------------------------------------------
 
 /**
- * The kart circuit: a 5×3 block holding a ~330-unit track with red/white
- * barrier walls on both sides, a pit lane in from the south road, a start
- * gantry, the time-trial booth and grandstands along the north. Built
- * block-local; the group sits at the block's north-west corner.
+ * The kart circuit: a track (from a saved TrackDef) with red/white barrier walls on both sides,
+ * a start gantry, grandstands along the north and a paddock along the south (gate, start pad,
+ * time-trial booth). Built block-local; the group sits at the block's north-west corner.
  */
-export function buildCircuit(block: Block): CircuitObjects {
+export function buildCircuit(block: Block, def: TrackDef): CircuitObjects {
   const bb = blockBounds(block);
   const ox = bb.minX, oz = bb.minZ;
   const W = bb.maxX - bb.minX, D = bb.maxZ - bb.minZ;
@@ -347,11 +209,10 @@ export function buildCircuit(block: Block): CircuitObjects {
   const mb = new ModelBuilder();
 
   // --- Track -------------------------------------------------------------------------
-  const plan = planTrack();
+  const plan = planTrack(def.corners);
   const n = plan.pts.length;
   const step = plan.length / n;
-  const startZ = plan.pts[nearestIndex(plan, START_X, 60)].z;
-  const startIndex = nearestIndex(plan, START_X, startZ);
+  const startIndex = plan.startIndex;
   const behind = (d: number) => (startIndex - Math.round(d / step) + n) % n;
   const gridIndices = [behind(3), behind(6), behind(9), behind(12)];
   group.add(trackSurface(plan, startIndex, gridIndices));
@@ -363,117 +224,33 @@ export function buildCircuit(block: Block): CircuitObjects {
     startPos: new THREE.Vector3(ox + plan.pts[gridIndices[0]].x, 0, oz + plan.pts[gridIndices[0]].z),
     startHeading: Math.atan2(st.x, st.z),
   };
-  const check = checkTrack(plan.pts, HALF_WIDTH);
-  if (!check.ok) console.warn('[circuit] kart track too tight', check);
 
-  // --- Barrier walls on both sides, with the opening in the outer wall ----------------
-  const outer = -plan.inward;
-  const openIndex = nearestIndex(plan, OPENING.x, startZ);
-  const op = plan.pts[openIndex], ol = plan.left[openIndex];
-  const openAt = new THREE.Vector2(op.x + ol.x * outer * WALL, op.z + ol.z * outer * WALL);
-  const inOpening = (x: number, z: number, side: number) => side === outer && Math.hypot(x - openAt.x, z - openAt.y) < OPENING.half;
+  // --- Barrier walls on both sides (closed: karts are put on the grid for a race) -------
   for (const side of [-1, 1]) {
     const line = wallLine(plan, side);
     // Colliders: a tight chain of small boxes, so nothing slips between them.
-    for (const p of along(line, WALL_STEP)) {
-      if (!inOpening(p.x, p.z, side)) collide(p.x, p.z, WALL_BOX, WALL_BOX);
-    }
+    for (const p of along(line, WALL_STEP)) collide(p.x, p.z, WALL_BOX, WALL_BOX);
     // Looks: low concrete blocks in alternating red and white, with a white cap stripe.
     const pts = along(line, 1.2);
     for (let k = 0; k < pts.length; k++) {
       const a = pts[k], b = pts[(k + 1) % pts.length];
-      const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
-      if (inOpening(mx, mz, side) || inOpening(a.x, a.z, side) || inOpening(b.x, b.z, side)) continue;
       const len = Math.hypot(b.x - a.x, b.z - a.z);
       if (len < 0.05) continue;
+      const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
       const rotY = Math.atan2(b.x - a.x, b.z - a.z);
       mb.box(0.5, 0.55, len + 0.03, k % 2 ? WHITE : RED, [mx, 0.275, mz], [0, rotY, 0]);
       mb.box(0.54, 0.06, len + 0.03, k % 2 ? '#e6e1d6' : WHITE, [mx, 0.58, mz], [0, rotY, 0]);
     }
   }
-  // Bollards at the ends of the opening.
-  {
-    const t = plan.tan[openIndex];
-    for (const s of [-1, 1]) {
-      const x = openAt.x + t.x * s * (OPENING.half + 0.1), z = openAt.y + t.z * s * (OPENING.half + 0.1);
-      stripedPost(mb, x, z, 1.1, 0.25, YELLOW, '#2b2d31', 0.22);
-      mb.sphere(0.2, YELLOW, [x, 1.15, z], 1, 0);
-      collide(x, z, 0.3, 0.3);
-    }
-  }
-
-  // --- Pit lane from the road to the opening --------------------------------------------
-  const eMin = EDGE, eMaxX = W - EDGE, eMaxZ = D - EDGE;
-  {
-    const z0 = startZ + HALF_WIDTH + 0.1, z1 = eMaxZ + 0.3;
-    const x0 = OPENING.x - OPENING.half, x1 = OPENING.x + OPENING.half;
-    mb.box(x1 - x0, 0.02, z1 - z0, '#6e7178', [OPENING.x, 0.02, (z0 + z1) / 2]);
-    for (const x of [x0 + 0.15, x1 - 0.15]) mb.box(0.14, 0.02, z1 - z0, WHITE, [x, 0.032, (z0 + z1) / 2]);
-    for (let z = z0 + 1; z < z1 - 0.5; z += 1.6) mb.box(0.14, 0.02, 0.8, YELLOW, [OPENING.x, 0.032, z]);
-    // "PIT" chevrons pointing into the track.
-    for (let i = 0; i < 2; i++) {
-      const cz = z1 - 1.3 - i * 1.1;
-      for (const s of [-1, 1]) mb.box(1.1, 0.02, 0.18, WHITE, [OPENING.x + s * 0.42, 0.034, cz + 0.28], [0, s * 0.8, 0]);
-    }
-  }
-
-  // --- Perimeter fence with the same entrance gap, and a gate ----------------------------
-  const gateL = OPENING.x - OPENING.half - 0.3, gateR = OPENING.x + OPENING.half + 0.3;
-  for (const [x0, z0, x1, z1] of [[eMin, eMin, eMaxX, eMin], [eMin, eMin, eMin, eMaxZ], [eMaxX, eMin, eMaxX, eMaxZ], [eMin, eMaxZ, gateL, eMaxZ], [gateR, eMaxZ, eMaxX, eMaxZ]] as const) {
-    const c = fenceRun(mb, x0, z0, x1, z1);
-    collide(c.x, c.z, c.hw, c.hd);
-  }
-  for (const x of [gateL, gateR]) {
-    // Chequered gate posts.
-    for (let i = 0; i < 6; i++) mb.box(0.4, 0.45, 0.4, i % 2 ? '#222226' : WHITE, [x, 0.225 + i * 0.45, eMaxZ]);
-    mb.with({ glow: 1 }, () => mb.sphere(0.25, YELLOW, [x, 2.95, eMaxZ], 1, 1));
-    collide(x, eMaxZ, 0.35, 0.35);
-  }
-  bunting(mb, [gateL, 2.8, eMaxZ], [gateR, 2.8, eMaxZ], 0.35, 2);
-  // Lamp posts with flags along the fence.
-  const lamps: [number, number][] = [];
-  for (let x = 8; x < W - 4; x += 12) lamps.push([x, eMaxZ], [x + 4, eMin]);
-  for (let z = 14; z < D - 8; z += 14) lamps.push([eMin, z], [eMaxX, z]);
-  lamps.forEach(([x, z], i) => {
-    if (Math.abs(x - OPENING.x) < OPENING.half + 1.5 && z === eMaxZ) return;
-    if (z === eMin && GRANDSTANDS.some(([a, b]) => x > a - 1 && x < b + 1)) return;
-    lampPost(mb, x, z, 3.2, FLAGS[i % FLAGS.length]);
-    collide(x, z, 0.2, 0.2);
-  });
-
-  // --- Race booth next to the pit lane --------------------------------------------------
-  {
-    const { x: rx, z: rz } = BOOTH;
-    mb.box(3.2, 0.2, 2.2, STONE, [rx, 0.1, rz]);
-    mb.box(2.8, 1.9, 1.8, CREAM, [rx, 1.15, rz]);
-    // Window and counter facing the pit lane (west).
-    mb.with({ glow: 1 }, () => mb.box(0.06, 0.7, 1.2, '#bfe6ff', [rx - 1.41, 1.5, rz]));
-    mb.box(0.45, 0.1, 1.5, WOOD, [rx - 1.6, 1.05, rz]);
-    mb.box(3.1, 0.18, 2.1, TEAL, [rx, 2.19, rz]);
-    for (let i = 0; i < 15; i++) {
-      for (let r = 0; r < 2; r++) mb.box(0.2, 0.1, 0.02, (i + r) % 2 ? '#222226' : WHITE, [rx - 1.4 + i * 0.2, 2.14 + r * 0.1, rz + 1.06]);
-    }
-    flagPole(mb, rx + 1.3, 2.28, rz - 0.8, 1.6, '#222226', WHITE);
-    collide(rx, rz, 1.6, 1.1);
-    const sign = makeSign('🏁 Time trial', { sub: 'kart owners only', posts: 0, width: 2.8, height: 0.95, bg: '#fff9e8' });
-    sign.position.set(rx, 2.85 - 1.35, rz + 0.75);
-    group.add(sign);
-    // A leaderboard post by the lane, facing the camera.
-    const board = makeSign('Kart Circuit', { sub: 'enter by the pit lane', posts: 2, width: 3.0, height: 0.9, bg: '#fff6dc' });
-    const bx = OPENING.x - OPENING.half - 3.2;
-    board.position.set(bx, 0, eMaxZ - 1.0);
-    board.scale.setScalar(0.85);
-    group.add(board);
-    for (const s of [-1, 1]) collide(bx + s * 1.07, eMaxZ - 1.2, 0.2, 0.2);
-  }
 
   // --- Start gantry with lights over the line ------------------------------------------
   const lightOn: THREE.Mesh[] = [];
+  const gantryLegs: V3[] = [];
   {
     const p = plan.pts[startIndex], l = plan.left[startIndex], t = plan.tan[startIndex];
     const reach = WALL + 1.0, top = 4.8;
-    const legs: V3[] = [-1, 1].map((s) => [p.x + l.x * s * reach, 0, p.z + l.z * s * reach] as V3);
-    for (const [x, , z] of legs) {
+    for (const s of [-1, 1]) gantryLegs.push([p.x + l.x * s * reach, 0, p.z + l.z * s * reach]);
+    for (const [x, , z] of gantryLegs) {
       mb.box(0.5, 0.3, 0.5, STONE, [x, 0.15, z]);
       stripedPost(mb, x, z, top, 0.16, WHITE, RED, 0.6);
       collide(x, z, 0.3, 0.3);
@@ -509,38 +286,111 @@ export function buildCircuit(block: Block): CircuitObjects {
     }
   }
 
-  // --- Grandstands along the north, outside the outer wall -----------------------------
-  GRANDSTANDS.forEach(([x0, x1], i) => {
-    const back = eMin + 0.7, front = Math.min(eMin + 5.3, 13 - WALL - 0.9);
+  // --- Perimeter fence with a gate in the south side -------------------------------------
+  const eMin = EDGE, eMaxX = W - EDGE, eMaxZ = D - EDGE;
+  const gateL = GATE_X - GATE_HALF - 0.3, gateR = GATE_X + GATE_HALF + 0.3;
+  for (const [x0, z0, x1, z1] of [[eMin, eMin, eMaxX, eMin], [eMin, eMin, eMin, eMaxZ], [eMaxX, eMin, eMaxX, eMaxZ], [eMin, eMaxZ, gateL, eMaxZ], [gateR, eMaxZ, eMaxX, eMaxZ]] as const) {
+    const c = fenceRun(mb, x0, z0, x1, z1);
+    collide(c.x, c.z, c.hw, c.hd);
+  }
+  for (const x of [gateL, gateR]) {
+    // Chequered gate posts.
+    for (let i = 0; i < 6; i++) mb.box(0.4, 0.45, 0.4, i % 2 ? '#222226' : WHITE, [x, 0.225 + i * 0.45, eMaxZ]);
+    mb.with({ glow: 1 }, () => mb.sphere(0.25, YELLOW, [x, 2.95, eMaxZ], 1, 1));
+    collide(x, eMaxZ, 0.35, 0.35);
+  }
+  bunting(mb, [gateL, 2.8, eMaxZ], [gateR, 2.8, eMaxZ], 0.35, 2);
+
+  // --- Grandstands along the north, clear of the gantry ----------------------------------
+  const grandstands: [number, number][] = [];
+  for (let x0 = 14; x0 + 16 <= W - 14; x0 += 30) {
+    const x1 = x0 + 18;
+    if (gantryLegs.some(([gx, , gz]) => gz < 12 && gx > x0 - 1.5 && gx < x1 + 1.5)) continue;
+    grandstands.push([x0, Math.min(x1, W - 14)]);
+  }
+  grandstands.forEach(([x0, x1], i) => {
+    const back = eMin + 0.7, front = eMin + 5.3;
     grandstand(mb, x0, x1, back, front, i);
     collide((x0 + x1) / 2, (back + front) / 2 + 0.1, (x1 - x0) / 2 + 0.1, (front - back) / 2 + 0.3);
   });
 
-  // --- Infield and hairpin decorations (only where clear of the walls) ------------------
+  // Lamp posts with flags along the fence.
+  const lamps: [number, number][] = [];
+  for (let x = 8; x < W - 4; x += 12) lamps.push([x, eMaxZ], [x + 4, eMin]);
+  for (let z = 14; z < D - 8; z += 14) lamps.push([eMin, z], [eMaxX, z]);
+  lamps.forEach(([x, z], i) => {
+    if (Math.abs(x - GATE_X) < GATE_HALF + 1.5 && z === eMaxZ) return;
+    if (z === eMin && grandstands.some(([a, b]) => x > a - 1 && x < b + 1)) return;
+    if (gantryLegs.some(([gx, , gz]) => Math.hypot(gx - x, gz - z) < 1.5)) return;
+    lampPost(mb, x, z, 3.2, FLAGS[i % FLAGS.length]);
+    collide(x, z, 0.2, 0.2);
+  });
+
+  // --- Paddock: start pad inside the gate, and the race booth -----------------------------
+  const pad = { x: GATE_X, z: D - 5.6 };
+  const BOOTH = { x: GATE_X + 7.5, z: D - 4.8 };
   {
-    const clear = (x: number, z: number, r: number) => distToTrack(plan, x, z) >= WALL + WALL_BOX + r;
-    const stacks: [number, number][] = [
-      [66.5, 30], [40.5, 30], [66.5, 27.4], [40.5, 27.4], [53.5, 21], [53.5, 31], [22, 18], [22.5, 42.5], [81, 18], [80.5, 41],
-    ];
-    stacks.forEach(([x, z], i) => {
-      if (!clear(x, z, 0.6)) return;
-      tyreStack(mb, x, z, 3, i % 2 ? RED : WHITE);
-      tyreStack(mb, x + 0.95, z + 0.3, 2, i % 2 ? WHITE : RED);
-      collide(x + 0.45, z + 0.15, 0.95, 0.65);
-    });
-    const trees: [number, number][] = [[22, 26], [25, 34], [53.5, 26], [80, 32], [66.5, 20], [40.5, 20], [21, 38]];
-    for (const [x, z] of trees) {
-      if (!clear(x, z, 1.4)) continue;
-      smallTree(mb, x, z, 1.05, undefined);
-      collide(x, z, 0.4, 0.4);
+    // Chequered pad where karts line up for a time trial.
+    const cells = 6, size = 0.8;
+    for (let i = 0; i < cells; i++) {
+      for (let k = 0; k < cells; k++) {
+        mb.box(size, 0.02, size, (i + k) % 2 ? '#222226' : WHITE, [pad.x + (i - (cells - 1) / 2) * size, 0.03, pad.z + (k - (cells - 1) / 2) * size]);
+      }
     }
-    for (const [x, z, w, d] of [[53.5, 16.5, 2.2, 1.0], [26, 22, 2.0, 1.0], [80.5, 25, 1.4, 2.0]] as const) {
-      if (!clear(x, z, Math.max(w, d) / 2 + 0.2)) continue;
-      flowerPatch(mb, x, z, w, d, Math.round(x));
+    for (const s of [-1, 1]) {
+      const x = pad.x + s * 4.2, z = pad.z - 1.6;
+      flagPole(mb, x, 0, z, 2.4, '#222226', WHITE);
+      collide(x, z, 0.15, 0.15);
     }
-    // A giant trophy in the west infield.
-    const [tx, tz] = [25, 29];
-    if (clear(tx, tz, 1.2)) {
+    const padSign = makeSign('🏁 Start line', { sub: 'drive on to race', posts: 2, width: 2.4, height: 0.8, bg: '#fff9e8' });
+    padSign.position.set(pad.x - 4.6, 0, pad.z + 1.4);
+    padSign.scale.setScalar(0.8);
+    group.add(padSign);
+    for (const s of [-1, 1]) collide(pad.x - 4.6 + s * 0.85, pad.z + 1.2, 0.2, 0.2);
+
+    const { x: rx, z: rz } = BOOTH;
+    mb.box(3.2, 0.2, 2.2, STONE, [rx, 0.1, rz]);
+    mb.box(2.8, 1.9, 1.8, CREAM, [rx, 1.15, rz]);
+    // Window and counter facing the pad (west).
+    mb.with({ glow: 1 }, () => mb.box(0.06, 0.7, 1.2, '#bfe6ff', [rx - 1.41, 1.5, rz]));
+    mb.box(0.45, 0.1, 1.5, WOOD, [rx - 1.6, 1.05, rz]);
+    mb.box(3.1, 0.18, 2.1, TEAL, [rx, 2.19, rz]);
+    for (let i = 0; i < 15; i++) {
+      for (let r = 0; r < 2; r++) mb.box(0.2, 0.1, 0.02, (i + r) % 2 ? '#222226' : WHITE, [rx - 1.4 + i * 0.2, 2.14 + r * 0.1, rz + 1.06]);
+    }
+    flagPole(mb, rx + 1.3, 2.28, rz - 0.8, 1.6, '#222226', WHITE);
+    collide(rx, rz, 1.6, 1.1);
+    const sign = makeSign(`🏁 ${def.name}`, { sub: 'time trials · track workshop', posts: 0, width: 2.8, height: 0.95, bg: '#fff9e8' });
+    sign.position.set(rx, 2.85 - 1.35, rz + 0.75);
+    group.add(sign);
+    // A board by the gate, outside, facing the camera.
+    const board = makeSign('Kart Circuit', { sub: def.name, posts: 2, width: 3.0, height: 0.9, bg: '#fff6dc' });
+    const bx = GATE_X - GATE_HALF - 3.2;
+    board.position.set(bx, 0, eMaxZ - 1.0);
+    board.scale.setScalar(0.85);
+    group.add(board);
+    for (const s of [-1, 1]) collide(bx + s * 1.07, eMaxZ - 1.2, 0.2, 0.2);
+  }
+
+  // --- Infield and trackside decorations, wherever there's room -------------------------
+  {
+    const area = trackArea(W, D);
+    const clear = (x: number, z: number, r: number) => distToTrack(plan.pts, x, z) >= WALL + WALL_BOX + r;
+    const spots: { x: number; z: number; h: number; d: number; inside: boolean }[] = [];
+    for (let z = area.minZ - 3; z <= area.maxZ + 3; z += 5.5) {
+      for (let x = area.minX - 3; x <= area.maxX + 3; x += 5.5) {
+        const h = hash2(x, z);
+        const jx = x + (h - 0.5) * 2.5, jz = z + (hash2(z, x) - 0.5) * 2.5;
+        if (jx < EDGE + 2 || jx > W - EDGE - 2 || jz < eMin + 7 || jz > D - 10) continue;
+        const d = distToTrack(plan.pts, jx, jz);
+        if (d < WALL + WALL_BOX + 1.6) continue;
+        spots.push({ x: jx, z: jz, h, d, inside: insideTrack(plan.pts, jx, jz) });
+      }
+    }
+    // A giant trophy in the roomiest bit of infield.
+    const trophy = spots.filter((s) => s.inside).sort((a, b) => b.d - a.d)[0];
+    if (trophy) {
+      const { x: tx, z: tz } = trophy;
       mb.box(1.6, 0.7, 1.6, STONE, [tx, 0.35, tz]);
       mb.box(1.7, 0.1, 1.7, WHITE, [tx, 0.72, tz]);
       mb.cyl(0.22, 0.36, 0.6, '#f2c94c', [tx, 1.07, tz], undefined, 10);
@@ -550,17 +400,63 @@ export function buildCircuit(block: Block): CircuitObjects {
       mb.sphere(0.17, PINK, [tx, 2.45, tz], 1, 0);
       collide(tx, tz, 0.9, 0.9);
     }
+    let stacks = 0, trees = 0, flowers = 0;
+    for (const s of spots) {
+      if (s === trophy || Math.hypot(s.x - (trophy?.x ?? -99), s.z - (trophy?.z ?? -99)) < 3) continue;
+      if (s.h < 0.16 && stacks < 16 && s.d < WALL + 4 && clear(s.x, s.z, 1.2)) {
+        // Tyre stacks guard the outside of the walls.
+        tyreStack(mb, s.x, s.z, 3, stacks % 2 ? RED : WHITE);
+        tyreStack(mb, s.x + 0.95, s.z + 0.3, 2, stacks % 2 ? WHITE : RED);
+        collide(s.x + 0.45, s.z + 0.15, 0.95, 0.65);
+        stacks++;
+      } else if (s.h > 0.55 && s.h < 0.75 && trees < 26 && clear(s.x, s.z, 1.4)) {
+        smallTree(mb, s.x, s.z, 0.9 + s.h * 0.3, undefined);
+        collide(s.x, s.z, 0.4, 0.4);
+        trees++;
+      } else if (s.h > 0.88 && flowers < 12 && clear(s.x, s.z, 1.3)) {
+        flowerPatch(mb, s.x, s.z, 2.0, 1.1, Math.round(s.x * 7 + s.z));
+        flowers++;
+      }
+    }
   }
 
   group.add(staticMesh(mb));
+
+  // Asphalt map for offTrack: half-unit cells within the asphalt and kerbs of the centerline.
+  const CELL = 0.5;
+  const cols = Math.ceil(W / CELL), rows = Math.ceil(D / CELL);
+  const paved = new Uint8Array(cols * rows);
+  {
+    const reach = HALF_WIDTH + KERB + 0.3;
+    const rc = Math.ceil(reach / CELL);
+    for (const p of plan.pts) {
+      const cx = Math.floor(p.x / CELL), cz = Math.floor(p.z / CELL);
+      for (let dz = -rc; dz <= rc; dz++) {
+        for (let dx = -rc; dx <= rc; dx++) {
+          const gx = cx + dx, gz = cz + dz;
+          if (gx < 0 || gz < 0 || gx >= cols || gz >= rows) continue;
+          if (Math.hypot((gx + 0.5) * CELL - p.x, (gz + 0.5) * CELL - p.z) <= reach) paved[gz * cols + gx] = 1;
+        }
+      }
+    }
+  }
+  const pad0 = { x: pad.x - 3, z: pad.z - 3 };
 
   const world = (x: number, z: number) => new THREE.Vector3(ox + x, 0, oz + z);
   return {
     group,
     colliders,
     track,
+    def,
     booth: world(BOOTH.x - 2.4, BOOTH.z),
-    entrance: world(OPENING.x, D - 1),
+    pad: world(pad.x, pad.z),
+    entrance: world(GATE_X, D - 1),
+    offTrack(x: number, z: number) {
+      const lx = x - ox, lz = z - oz;
+      if (lx < EDGE || lz < EDGE || lx > W - EDGE || lz > D - EDGE) return false;
+      if (lx > pad0.x && lx < pad0.x + 6 && lz > pad0.z && lz < pad0.z + 6) return false; // the start pad
+      return !paved[Math.floor(lz / CELL) * cols + Math.floor(lx / CELL)];
+    },
     update(_dt: number, t: number) {
       // Idle start-light sequence: five reds come on one by one, hold, then all go out.
       const phase = t % 7;

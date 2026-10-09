@@ -113,10 +113,8 @@ export class Player {
   }
 
   jump() {
-    if (this.driving) {
-      if (this.enabled) this.kart!.hop();
-      return true;
-    }
+    // In the kart, Space is the drift button (held), not a hop.
+    if (this.driving) return true;
     if (!this.enabled || this.busyAction || this.airborne) return false;
     this.vy = 7.2;
     return true;
@@ -272,7 +270,8 @@ export class Player {
   }
 
   private followCamera(dt: number) {
-    this.camPos.lerp(this.cameraTarget(), 1 - Math.exp(-dt * 5));
+    // Karts are fast: follow them tighter so they stay near the middle of the screen.
+    this.camPos.lerp(this.cameraTarget(), 1 - Math.exp(-dt * (this.driving ? 8 : 5)));
     this.camera.position.copy(this.camPos);
     const look = new THREE.Vector3(this.camPos.x, 1.0, this.camPos.z - 15.5 * this.zoom - 2.5);
     this.camera.lookAt(look);

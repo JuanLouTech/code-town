@@ -5,6 +5,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ClientMsg, ServerMsg } from '../shared/protocol.ts';
 import { PlayerStore } from './player.ts';
+import { TrackStore } from './tracks.ts';
 import { SessionManager } from './sessions.ts';
 import { Terminals } from './terminals.ts';
 import { World } from './world.ts';
@@ -41,6 +42,7 @@ try {
 
 const world = new World(ROOT, DATA_DIR);
 const player = new PlayerStore(DATA_DIR);
+const tracks = new TrackStore(DATA_DIR, (player.all().circuit as { board?: unknown } | undefined)?.board);
 const sessions = new SessionManager(world, CLAUDE_BIN);
 const worktrees = new Worktrees(world, DATA_DIR);
 world.watch();
@@ -184,6 +186,10 @@ function send(ws: WebSocket, msg: ServerMsg) {
 const terminals = new Terminals(world, send);
 terminals.worktreesOf = (id) => worktreeDirs(id);
 
+function broadcastTracks() {
+  broadcast({ t: 'tracks', tracks: tracks.list() });
+}
+
 function broadcast(msg: ServerMsg) {
   const data = JSON.stringify(msg);
   for (const ws of wss.clients) if (ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -302,6 +308,23 @@ async function route(ws: WebSocket, msg: ClientMsg) {
     case 'arrange':
       world.arrange(msg.blocks && typeof msg.blocks === 'object' ? msg.blocks : {}, msg.slots && typeof msg.slots === 'object' ? msg.slots : {});
       break;
+    case 'track.save':
+      try {
+        const id = tracks.save(msg.track);
+        broadcastTracks(); // first, so the saver already has the new file when its answer arrives
+        send(ws, { t: 'track.saved', reqId: msg.reqId, id });
+      } catch (err) {
+        send(ws, { t: 'track.saved', reqId: msg.reqId, error: (err as Error).message });
+      }
+      break;
+    case 'track.delete':
+      tracks.delete(msg.id);
+      broadcastTracks();
+      break;
+    case 'track.time':
+      tracks.addTime(msg.id, msg.run);
+      broadcastTracks();
+      break;
     case 'save': {
       player.set(msg.key, msg.value);
       // Other open tabs follow along, so none of them overwrites this with an older copy.
@@ -315,7 +338,7 @@ async function route(ws: WebSocket, msg: ClientMsg) {
 wss.on('connection', (ws) => {
   clearTimeout(leaveTimer);
   send(ws, { t: 'hello', world: world.state, sessions: sessions.list(), claudeVersion, commands: sessions.allCommands(), player: player.all(),
-    worktrees: worktrees.worktrees, visitors: worktrees.visitors });
+    tracks: tracks.list(), worktrees: worktrees.worktrees, visitors: worktrees.visitors });
   ws.on('close', () => terminals.closeFor(ws));
   ws.on('message', (raw) => {
     let msg: ClientMsg;
