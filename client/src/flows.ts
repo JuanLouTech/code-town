@@ -69,8 +69,11 @@ function workingStatus(s: SessionSummary) {
   const gnomes = s.agents.filter((a) => a.status === 'running').length;
   return `🌱 ${codeify(label)}` +
     (gnomes ? ` · 🧙 ${gnomes} gnome${gnomes > 1 ? 's' : ''}` : '') +
-    (s.aside && !s.aside.answer ? ' · 💭 side question' : '');
+    (s.aside && !s.aside.answer ? (isBang(s.aside.question) ? ' · 💻 running your command' : ' · 💭 side question') : '');
 }
+
+/** `! cmd` runs a shell command (bash mode); its output comes back as a side note. */
+const isBang = (text: string) => text.startsWith('!');
 
 export class Flows {
   talking?: Actor;
@@ -250,7 +253,7 @@ export class Flows {
       return null;
     }
     net.send({ t: 'send', id, text });
-    if (!/^\/(btw|stop)\b/i.test(text)) {
+    if (!/^\/(btw|stop)\b/i.test(text) && !isBang(text)) {
       await this.waitSession(id, (s) => s.status === 'working' || s.status === 'starting' || s.status === 'waiting', 1500);
     }
     return text;
@@ -313,7 +316,8 @@ export class Flows {
         if (key.startsWith('a:')) {
           asideSeen = s.aside!.ts;
           dialog.setStatus(s.status === 'working' ? workingStatus(s) : null);
-          await dialog.show(`💭 *About “${s.aside!.question}”…*\n\n${s.aside!.answer}`, { md: true });
+          const q = s.aside!.question;
+          await dialog.show(isBang(q) ? `💻 \`${q}\`\n\n${s.aside!.answer}` : `💭 *About “${q}”…*\n\n${s.aside!.answer}`, { md: true });
           await race(dialog.choose([{ label: '👍 Thanks!', value: 'ok' }], { cancel: 'ok' }));
           shownNarr = undefined;
           continue;
@@ -355,7 +359,7 @@ export class Flows {
             continue;
           }
           const sent = await this.compose(actor, id, `Tell ${actor.name} something…`);
-          if (sent && !sent.startsWith('/btw')) {
+          if (sent && !sent.startsWith('/btw') && !isBang(sent)) {
             baseline = store.sessions.get(id)?.lastText;
             shownNarr = undefined;
           }
@@ -364,7 +368,7 @@ export class Flows {
 
         // Finished (or failed): show the reply, scrollable in the bubble.
         const isErr = key.startsWith('e:');
-        const sideStatus = (c: SessionSummary) => (c.aside && !c.aside.answer ? '💭 Thinking about your side question' : null);
+        const sideStatus = (c: SessionSummary) => (c.aside && !c.aside.answer ? (isBang(c.aside.question) ? '💻 Running your command' : '💭 Thinking about your side question') : null);
         dialog.setStatus(sideStatus(s));
         if (fresh || s.turns !== shownTurn) {
           const text = isErr ? `Oh no… something went wrong. 😣\n\n\`${(s.error ?? 'Unknown trouble').slice(0, 400)}\`` : s.lastText ?? 'All done!';
@@ -403,7 +407,7 @@ export class Flows {
           continue;
         }
         const sent = await this.compose(actor, id, `Reply to ${actor.name}…`);
-        if (sent && !sent.startsWith('/btw')) {
+        if (sent && !sent.startsWith('/btw') && !isBang(sent)) {
           baseline = s.lastText;
           shownNarr = undefined;
         }
@@ -575,7 +579,7 @@ export class Flows {
       const busy = s.status === 'working' || s.status === 'starting';
       const side = s.aside && !s.aside.answer;
       if (busy || side) {
-        typing.innerHTML = `<b>${escapeHtml(actor.name)}</b> ${busy ? `is working · ${codeify(s.activity?.label ?? 'thinking')}` : 'is thinking about your side question'} <span class="dots"><i></i><i></i><i></i></span>`;
+        typing.innerHTML = `<b>${escapeHtml(actor.name)}</b> ${busy ? `is working · ${codeify(s.activity?.label ?? 'thinking')}` : isBang(s.aside!.question) ? 'is running your command' : 'is thinking about your side question'} <span class="dots"><i></i><i></i><i></i></span>`;
         typing.style.display = 'flex';
       } else typing.style.display = 'none';
       const key = s.pending?.id;

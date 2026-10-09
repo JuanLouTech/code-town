@@ -28,6 +28,14 @@ function userText(content: unknown): string | null {
       ? (content as Block[]).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n')
       : '';
   if (!text.trim()) return null;
+  if (text.includes('<bash-input>')) {
+    // `!` commands (bash mode): show the command, not its output.
+    const shown = text
+      .replace(/<bash-input>([\s\S]*?)<\/bash-input>/g, (_, c: string) => '`! ' + c.trim() + '`')
+      .replace(/<bash-(stdout|stderr)>[\s\S]*?<\/bash-\1>/g, '')
+      .trim();
+    return shown || null;
+  }
   const cmd = text.match(/<command-name>([^<]*)<\/command-name>/);
   if (cmd) return `\`${cmd[1].trim()}\``;
   if (/^\s*<(local-command|system-reminder|command-|task-notification)/.test(text) || text.startsWith('Caveat:')) return null;

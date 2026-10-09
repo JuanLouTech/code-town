@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -18,6 +19,8 @@ import { describeInput, describeTool, isAgentTool, toolMode, toolPath } from './
 import type { World } from './world.ts';
 
 const MAX_ENTRIES = 2000;
+const BANG_TIMEOUT_MS = 120_000;
+const BANG_MAX_OUTPUT = 30_000;
 const REMOVE_CLOSED_AFTER_MS = 60_000;
 
 const BASE_APPEND = [
@@ -112,6 +115,7 @@ class Session {
   commands: CommandInfo[] = [];
   mainCost = 0;
   extraCost = 0; // /btw forks
+  bangContext: string[] = []; // `!` command output, handed to Claude with the next message
   newEntries: TranscriptEntry[] = [];
   flushTimer?: NodeJS.Timeout;
   touchTimer?: NodeJS.Timeout;
@@ -673,6 +677,11 @@ export class SessionManager extends EventEmitter {
       if (btw[1].trim()) void this.btw(sess, btw[1].trim());
       return;
     }
+    const bang = text.match(/^!\s*([\s\S]*)$/);
+    if (bang) {
+      if (bang[1].trim()) void this.bang(sess, bang[1].trim());
+      return;
+    }
     if (/^\/stop\s*$/i.test(text)) {
       void this.interrupt(id);
       return;
@@ -685,7 +694,51 @@ export class SessionManager extends EventEmitter {
     sess.s.unread = false;
     sess.s.error = undefined;
     this.addEntry(sess, this.entry('user', text));
-    sess.input!.push(this.userMessage(text));
+    sess.input!.push(this.userMessage(text, sess.bangContext.splice(0)));
+    this.touch(sess);
+  }
+
+  /**
+   * `! cmd`: runs a shell command in the session's folder without a Claude turn, like
+   * Claude Code's bash mode. The output shows up as a side note and is passed to Claude,
+   * in the CLI's `<bash-input>`/`<bash-stdout>` form, along with the next message.
+   */
+  private async bang(sess: Session, cmd: string) {
+    const question = `! ${cmd}`;
+    this.addEntry(sess, this.entry('user', '```sh\n' + question + '\n```'));
+    sess.s.aside = { question, ts: Date.now() };
+    this.touch(sess);
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !k.startsWith('CLAUDE_CODE') && k !== 'CLAUDECODE') env[k] = v;
+    }
+    const cwd = fs.existsSync(sess.s.cwd) ? sess.s.cwd : sess.launch.building.path;
+    const { stdout, stderr, code, error } = await new Promise<{ stdout: string; stderr: string; code: number | null; error?: string }>((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      const cap = (acc: string, d: Buffer) => (acc.length < BANG_MAX_OUTPUT ? acc + d.toString() : acc);
+      const child = spawn(process.env.SHELL || '/bin/zsh', ['-c', cmd], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: BANG_TIMEOUT_MS });
+      child.stdout.on('data', (d: Buffer) => (stdout = cap(stdout, d)));
+      child.stderr.on('data', (d: Buffer) => (stderr = cap(stderr, d)));
+      child.on('error', (err) => resolve({ stdout, stderr, code: null, error: err.message }));
+      child.on('close', (code, signal) => resolve({
+        stdout, stderr, code,
+        error: signal === 'SIGTERM' ? `Timed out after ${BANG_TIMEOUT_MS / 1000}s` : signal ? `Killed (${signal})` : undefined,
+      }));
+    });
+    const trim = (t: string) => (t.length > BANG_MAX_OUTPUT ? t.slice(0, BANG_MAX_OUTPUT) + '\n… (output truncated)' : t).replace(/\s+$/, '');
+    const out = trim(stdout);
+    const err = trim([stderr, error].filter(Boolean).join('\n'));
+    const fence = (t: string) => '````\n' + t + '\n````';
+    const answer = [
+      out || err ? '' : '_(no output)_',
+      out && fence(out),
+      err && fence(err),
+      code ? `_Exit code ${code}_` : '',
+    ].filter(Boolean).join('\n\n');
+    this.addEntry(sess, this.entry('aside', answer));
+    sess.s.aside = { question, answer, ts: Date.now() };
+    sess.bangContext.push(`<bash-input>${cmd}</bash-input>\n<bash-stdout>${out}</bash-stdout><bash-stderr>${err}</bash-stderr>`);
     this.touch(sess);
   }
 
@@ -769,8 +822,9 @@ export class SessionManager extends EventEmitter {
     return sess;
   }
 
-  private userMessage(text: string): SDKUserMessage {
-    return { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null } as SDKUserMessage;
+  private userMessage(text: string, before: string[] = []): SDKUserMessage {
+    const content = before.length ? [...before, text].map((t) => ({ type: 'text', text: t })) : text;
+    return { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null } as SDKUserMessage;
   }
 
   private entry(kind: TranscriptEntry['kind'], text: string): TranscriptEntry {
